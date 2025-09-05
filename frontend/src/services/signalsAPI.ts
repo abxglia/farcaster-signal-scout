@@ -77,7 +77,7 @@ export class SignalsAPI {
 
     // Prefer Vite env; fallback to local dev default
     // Example: VITE_SIGNALS_API_BASE_URL=https://your-server.example.com
-    this.baseUrl = (import.meta as any).env.VITE_SIGNALS_API_BASE_URL || '';
+    this.baseUrl = (import.meta as any).env.VITE_SIGNALS_API_BASE_URL || 'https://farcaster.maxxit.ai';
     console.log('baseUrl', (import.meta as any).env.VITE_SIGNALS_API_BASE_URL);
   }
 
@@ -441,3 +441,4 @@ export class SignalsAPI {
 
 // Export singleton instance
 export const signalsAPI = SignalsAPI.getInstance();
+

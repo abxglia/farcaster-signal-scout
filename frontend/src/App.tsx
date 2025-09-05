@@ -9,12 +9,13 @@ import TopSignalsBrowserAbi from "./abi/TopSignalsBrowser.json";
 
 // Address of the deployed Top Signals Browser contract
 // Update this after deploying your own contract
-const CONTRACT_ADDRESS = "0xfb8e062817cdbed024c00ec2e351060a1f6c4ae2"; // TODO: Update with deployed address
+const CONTRACT_ADDRESS = "0xaeac28d4881f1f6ee3d9014d2c34ba856c039b8a"; // TODO: Update with deployed address
 
 import { signalsAPI, TokenSignal, TokenDetail } from "./services/signalsAPI";
 import { TokenSignalCard } from "./components/TokenSignalCard";
 import { TokenDetailView } from "./components/TokenDetailView";
 import { ResearcherNFT } from "./components/ResearcherNFT";
+import { SignalScoutNFT } from "./components/SignalScoutNFT";
 
 type View = 'list' | 'detail' | 'watchlist';
 
@@ -22,7 +23,7 @@ export default function App() {
   // Ethers setup
   const RPC_URL = (import.meta as any).env.VITE_RPC_URL || 'https://sepolia-rollup.arbitrum.io/rpc';
   const publicProvider = new ethers.JsonRpcProvider(RPC_URL);
-  const publicContract = new ethers.Contract(CONTRACT_ADDRESS, TopSignalsBrowserAbi, publicProvider);
+  const publicContract = new ethers.Contract(CONTRACT_ADDRESS, TopSignalsBrowserAbi as any, publicProvider);
 
   // App state for connection and contract interactions
   const [isConnected, setIsConnected] = useState(false);
@@ -48,6 +49,63 @@ export default function App() {
 
   useEffect(() => {
     sdk.actions.ready();
+  }, []);
+
+  // Auto-connect on refresh and react to account changes
+  useEffect(() => {
+    const eth = (window as any).ethereum;
+    if (!eth) return;
+
+    let isMounted = true;
+
+    const init = async () => {
+      try {
+        const browserProvider = new ethers.BrowserProvider(eth);
+        const accounts: string[] = await browserProvider.send('eth_accounts', []);
+        if (isMounted && accounts && accounts.length > 0) {
+          const sign = await browserProvider.getSigner();
+          const addr = await sign.getAddress();
+          setSigner(sign);
+          setAddress(addr);
+          setIsConnected(true);
+          fetchContractData();
+        }
+      } catch (e) {
+        console.error('Auto-connect failed:', e);
+      }
+    };
+
+    const handleAccountsChanged = async (accs: string[]) => {
+      if (!accs || accs.length === 0) {
+        setIsConnected(false);
+        setSigner(null);
+        setAddress(null);
+        return;
+      }
+      try {
+        const browserProvider = new ethers.BrowserProvider(eth);
+        const sign = await browserProvider.getSigner();
+        const addr = await sign.getAddress();
+        setSigner(sign);
+        setAddress(addr);
+        setIsConnected(true);
+      } catch (e) {
+        console.error('accountsChanged handler failed:', e);
+      }
+    };
+
+    init();
+    eth.on?.('accountsChanged', handleAccountsChanged);
+    eth.on?.('disconnect', () => {
+      setIsConnected(false);
+      setSigner(null);
+      setAddress(null);
+    });
+
+    return () => {
+      isMounted = false;
+      eth.removeListener?.('accountsChanged', handleAccountsChanged);
+    };
   }, []);
 
   // Fetch contract data
@@ -84,11 +142,7 @@ export default function App() {
       try {
         let tokensData: TokenSignal[] = [];
         
-        if (currentView === 'watchlist') {
-          tokensData = await signalsAPI.getWatchlistTokens();
-        } else {
-          tokensData = await signalsAPI.getTopSignals(signalsDirection);
-        }
+        tokensData = await signalsAPI.getTopSignals(signalsDirection);
         
         setTokens(tokensData);
       } catch (error) {
@@ -127,58 +181,9 @@ export default function App() {
     }
   };
 
-  // Handle token click: fetch details and increment counter on-chain via connected wallet
-  const handleTokenClick = async (symbol: string) => {
-    console.log('Token clicked:', symbol);
-    setLoading(true);
-    try {
-      const tokenDetail = await signalsAPI.getTokenDetail(symbol);
-      console.log('Token detail result:', tokenDetail);
-      if (tokenDetail) {
-        setSelectedToken(tokenDetail);
-        setCurrentView('detail');
-      } else {
-        console.warn('No token detail found for:', symbol);
-      }
+  // No detail navigation; main page only
 
-      // Increment global counter on contract using the connected wallet
-      if (isConnected && signer) {
-        setIsPending(true);
-        try {
-          const contractWithSigner = new ethers.Contract(CONTRACT_ADDRESS, TopSignalsBrowserAbi, signer);
-          const tx = await contractWithSigner.incrementCounter();
-          setTxHash(tx.hash);
-          setIsConfirming(true);
-          const receipt = await tx.wait();
-          setIsConfirming(false);
-          if (receipt.status === 1) {
-            fetchContractData();
-          }
-        } catch (error) {
-          console.error('Error incrementing counter on contract:', error);
-          setError(error as Error);
-        } finally {
-          setIsPending(false);
-        }
-      }
-    } catch (error) {
-      console.error('Error loading token detail:', error);
-    }
-    setLoading(false);
-  };
-
-  // Handle watchlist toggle
-  const handleWatchlistToggle = (symbol: string) => {
-    if (signalsAPI.isInWatchlist(symbol)) {
-      signalsAPI.removeFromWatchlist(symbol);
-    } else {
-      signalsAPI.addToWatchlist(symbol);
-    }
-    // Refresh tokens if on watchlist view
-    if (currentView === 'watchlist') {
-      signalsAPI.getWatchlistTokens().then(setTokens);
-    }
-  };
+  // Remove watchlist functionality
 
   // Track token interaction (frontend analytics only; no on-chain write here)
   const handleTrackView = async (symbol: string) => {
@@ -192,7 +197,7 @@ export default function App() {
     setIsPending(true);
     setIsMinted(false);
     try {
-      const contractWithSigner = new ethers.Contract(CONTRACT_ADDRESS, TopSignalsBrowserAbi, signer);
+      const contractWithSigner = new ethers.Contract(CONTRACT_ADDRESS, TopSignalsBrowserAbi as any, signer);
       const tx = await contractWithSigner.mintNftAtMilestone({ value: 0n });
       setTxHash(tx.hash);
       setIsConfirming(true);
@@ -207,6 +212,44 @@ export default function App() {
       setError(error as Error);
     } finally {
       setIsPending(false);
+    }
+  };
+
+  // Mint Signal Scout NFT
+  const handleMintSignalScoutNFT = async () => {
+    if (!isConnected || !signer) return;
+
+    setIsPending(true);
+    try {
+      const contractWithSigner = new ethers.Contract(CONTRACT_ADDRESS, TopSignalsBrowserAbi as any, signer);
+      const tx = await contractWithSigner.mintSignalScoutNft({ value: 0n });
+      setTxHash(tx.hash);
+      setIsConfirming(true);
+      const receipt = await tx.wait();
+      setIsConfirming(false);
+      if (receipt.status === 1) {
+        fetchContractData();
+      }
+    } catch (error) {
+      console.error('Error minting Signal Scout NFT:', error);
+      setError(error as Error);
+    } finally {
+      setIsPending(false);
+    }
+  };
+
+  // On-chain subscribe helper
+  const handleOnChainSubscribe = async (fid: number, token: string, threshold: number) => {
+    if (!isConnected || !signer) return;
+    try {
+      const contractWithSigner = new ethers.Contract(CONTRACT_ADDRESS, TopSignalsBrowserAbi as any, signer);
+      // subscribeToToken(uint256 _fid, string _token, uint256 _threshold)
+      const tx = await contractWithSigner.subscribeToToken(fid, token, BigInt(threshold));
+      await tx.wait();
+      // optional: refresh any contract data if needed
+    } catch (e) {
+      console.error('subscribeToToken failed:', e);
+      throw e;
     }
   };
 
@@ -227,35 +270,24 @@ export default function App() {
     });
   };
 
-  // Render token detail view
-  if (currentView === 'detail' && selectedToken) {
-    return (
-      <TokenDetailView
-        token={selectedToken}
-        onBack={handleBack}
-        isInWatchlist={signalsAPI.isInWatchlist(selectedToken.symbol)}
-        onWatchlistToggle={handleWatchlistToggle}
-        onTrackView={handleTrackView}
-      />
-    );
-  }
+  // No detail route in simplified UI
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 to-cyan-900 text-white">
+    <div className="min-h-screen bg-white text-slate-900">
       {/* Header */}
-      <div className="bg-slate-950/90 border-b border-slate-800 p-4">
+      <div className="bg-white/90 border-b border-slate-200 p-4">
         <div className="max-w-4xl mx-auto">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-gradient-to-br from-cyan-500 to-blue-600 rounded-lg flex items-center justify-center">
-                <span className="text-white font-bold text-lg">📊</span>
+              <div className="w-8 h-8 rounded-md bg-blue-600 flex items-center justify-center">
+                <span className="text-white font-bold text-sm">SS</span>
               </div>
-              <h1 className="text-2xl font-bold text-white">Top Signals Browser</h1>
+              <h1 className="text-xl font-bold tracking-tight">Signal Scout</h1>
             </div>
             
             {!isConnected ? (
               <button
-                className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 text-white font-semibold rounded-lg transition-colors"
+                className="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-md transition-colors"
                 disabled={isConnecting}
                 onClick={connectWallet}
               >
@@ -263,15 +295,9 @@ export default function App() {
               </button>
             ) : (
               <div className="flex items-center gap-3">
-                <span className="text-sm text-slate-400">
-                  Counter: {counterValue} • Next: {nextMilestone}
-                </span>
-                <button
-                  onClick={handleShare}
-                  className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white font-semibold rounded-lg transition-colors"
-                >
-                  Share
-                </button>
+                <div className="px-3 py-2 rounded-md border border-slate-200 bg-white text-slate-700 text-sm font-mono">
+                  {address ? `${address.slice(0, 6)}...${address.slice(-4)}` : 'Connected'}
+                </div>
               </div>
             )}
           </div>
@@ -279,49 +305,32 @@ export default function App() {
       </div>
 
       <div className="max-w-4xl mx-auto p-4">
-        {/* Navigation Tabs */}
-        <div className="flex gap-2 mb-6">
-          <button
-            onClick={() => setCurrentView('list')}
-            className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
-              currentView === 'list' 
-                ? 'bg-cyan-600 text-white' 
-                : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700/50'
-            }`}
-          >
-            Signals
-          </button>
-          <button
-            onClick={() => setCurrentView('watchlist')}
-            className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
-              currentView === 'watchlist' 
-                ? 'bg-cyan-600 text-white' 
-                : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700/50'
-            }`}
-          >
-            Watchlist
-          </button>
+        {/* Minimal hero */}
+        <div className="mb-6 rounded-xl bg-slate-50 border border-slate-200 p-5">
+          <div className="text-lg md:text-xl font-semibold tracking-tight">6h Momentum Signals</div>
+          <div className="text-slate-600 text-sm md:text-base">Track liquidity, social buzz, and rank with a clean, focused view.</div>
         </div>
+        {/* Navigation removed - single list view */}
 
-        {/* Direction Tabs (only for signals view) */}
-        {currentView === 'list' && (
+        {/* Direction Tabs */}
+        {(
           <div className="flex gap-2 mb-6">
             <button
               onClick={() => setSignalsDirection('gainers')}
-              className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
+              className={`px-3 py-2 rounded-md font-semibold transition-colors border ${
                 signalsDirection === 'gainers' 
-                  ? 'bg-green-600 text-white' 
-                  : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700/50'
+                  ? 'bg-blue-600 text-white border-blue-600' 
+                  : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
               }`}
             >
               ↑ Top Gainers
             </button>
             <button
               onClick={() => setSignalsDirection('losers')}
-              className={`px-4 py-2 rounded-lg font-semibold transition-colors ${
+              className={`px-3 py-2 rounded-md font-semibold transition-colors border ${
                 signalsDirection === 'losers' 
-                  ? 'bg-red-600 text-white' 
-                  : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700/50'
+                  ? 'bg-blue-600 text-white border-blue-600' 
+                  : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
               }`}
             >
               ↓ Top Losers
@@ -329,16 +338,21 @@ export default function App() {
           </div>
         )}
 
-        {/* Milestone NFT Section */}
+        {/* NFT Section */}
         {isConnected && (
-          <div className="mb-6">
-            <ResearcherNFT
+          <div className="mb-6 space-y-4">
+            {/* <ResearcherNFT
               counterValue={counterValue}
               nextMilestone={nextMilestone}
               isAtMilestone={isAtMilestone}
               hasNFT={hasNFT}
               onMintNFT={handleMintNFT}
               isLoading={isPending || isConfirming}
+            /> */}
+            <SignalScoutNFT
+              fid={1} // TODO: Get actual FID from Farcaster SDK
+              isConnected={isConnected}
+              onMintNFT={handleMintSignalScoutNFT}
             />
           </div>
         )}
@@ -346,23 +360,22 @@ export default function App() {
         {/* Tokens Grid */}
         {loading ? (
           <div className="text-center py-12">
-            <div className="text-cyan-300 text-lg">Loading signals...</div>
+            <div className="text-blue-600 text-lg">Loading signals...</div>
           </div>
         ) : tokens.length > 0 ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {tokens.map((token) => (
               <TokenSignalCard
                 key={token.symbol}
                 token={token}
-                onTokenClick={handleTokenClick}
-                isInWatchlist={signalsAPI.isInWatchlist(token.symbol)}
-                onWatchlistToggle={handleWatchlistToggle}
+                fid={1}
+                onChainSubscribe={handleOnChainSubscribe}
               />
             ))}
           </div>
         ) : (
           <div className="text-center py-12">
-            <div className="text-slate-400 text-lg">
+            <div className="text-slate-600 text-lg">
               {currentView === 'watchlist' 
                 ? 'Your watchlist is empty. Add tokens from the signals list!' 
                 : 'No signals available at the moment.'
@@ -372,9 +385,9 @@ export default function App() {
         )}
 
         {error && (
-          <div className="mt-4 p-4 bg-red-500/20 border border-red-500/30 rounded-lg">
-            <div className="text-red-400 font-semibold">Error</div>
-            <div className="text-red-300 text-sm">{error.message}</div>
+          <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-lg">
+            <div className="text-red-700 font-semibold">Error</div>
+            <div className="text-red-700/80 text-sm">{error.message}</div>
           </div>
         )}
       </div>

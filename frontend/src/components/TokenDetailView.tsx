@@ -1,5 +1,7 @@
 import React from 'react';
-import { TokenDetail } from '../services/signalsAPI';
+import { TokenDetail, signalsAPI } from '../services/signalsAPI';
+import { SubscriptionToggle } from './SubscriptionToggle';
+import { AlertsLog } from './AlertsLog';
 
 interface TokenDetailViewProps {
   token: TokenDetail;
@@ -7,6 +9,7 @@ interface TokenDetailViewProps {
   isInWatchlist: boolean;
   onWatchlistToggle: (symbol: string) => void;
   onTrackView: (symbol: string) => void;
+  fid?: number; // Farcaster ID for subscriptions
 }
 
 export const TokenDetailView: React.FC<TokenDetailViewProps> = ({
@@ -14,8 +17,12 @@ export const TokenDetailView: React.FC<TokenDetailViewProps> = ({
   onBack,
   isInWatchlist,
   onWatchlistToggle,
-  onTrackView
+  onTrackView,
+  fid = 1 // Default FID for demo purposes
 }) => {
+  const [isSubscribed, setIsSubscribed] = React.useState(false);
+  const [threshold, setThreshold] = React.useState(5);
+
   React.useEffect(() => {
     onTrackView(token.symbol);
   }, [token.symbol]); // Removed onTrackView from dependencies to prevent infinite loop
@@ -58,6 +65,22 @@ export const TokenDetailView: React.FC<TokenDetailViewProps> = ({
     if (absValue > 1) return 'Moderate';
     return 'Weak';
   };
+
+  // Get top 3 driver contributions
+  const topDrivers = React.useMemo(() => {
+    const drivers = [
+      { name: 'Social Volume', value: token.hx_buzz6 || 0, description: 'Social volume change' },
+      { name: 'Market Volume', value: token.hx_liq6 || 0, description: 'Market volume change' },
+      { name: 'AltRank Change', value: token.hx_rankimp6 || 0, description: 'AltRank change (negated)' },
+      { name: 'Sentiment Change', value: token.hx_sent6 || 0, description: 'Sentiment change' },
+      { name: 'Galaxy Change', value: token.hx_galchg6 || 0, description: 'Galaxy composite change' },
+      { name: 'Realized Return', value: token.hx_ret6 || 0, description: 'Realized return last 6h' }
+    ];
+
+    return drivers
+      .sort((a, b) => Math.abs(b.value) - Math.abs(a.value))
+      .slice(0, 3);
+  }, [token]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 to-cyan-900 text-white p-4">
@@ -102,7 +125,7 @@ export const TokenDetailView: React.FC<TokenDetailViewProps> = ({
 
       {/* Main Signal */}
       <div className="bg-slate-800/80 rounded-xl p-6 mb-6 border border-slate-700/50">
-        <h2 className="text-xl font-bold text-white mb-4">6h Momentum Signal</h2>
+        <h2 className="text-xl font-bold text-white mb-4">6h Momentum</h2>
         <div className="text-center">
           <div className={`text-5xl font-bold ${getSignalColor(token.hx_mom6)} mb-2`}>
             {token.hx_mom6 > 0 ? '+' : ''}{token.hx_mom6.toFixed(2)}%
@@ -110,6 +133,34 @@ export const TokenDetailView: React.FC<TokenDetailViewProps> = ({
           <div className="text-slate-400">
             {getSignalStrength(token.hx_mom6)} Signal
           </div>
+        </div>
+      </div>
+
+      {/* Top 3 Driver Contributions */}
+      <div className="bg-slate-800/80 rounded-xl p-6 mb-6 border border-slate-700/50">
+        <h2 className="text-xl font-bold text-white mb-4">Top 3 Signal Drivers</h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {topDrivers.map((driver, index) => (
+            <div key={driver.name} className={`p-4 rounded-xl ${getSignalBgColor(driver.value)}`}>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-sm font-semibold text-slate-400">#{index + 1}</h3>
+                <div className={`text-xs px-2 py-1 rounded-full ${
+                  Math.abs(driver.value) > 3 ? 'bg-yellow-500/20 text-yellow-300' : 'bg-slate-500/20 text-slate-300'
+                }`}>
+                  {Math.abs(driver.value) > 3 ? 'High Impact' : 'Moderate'}
+                </div>
+              </div>
+              <div className="text-lg font-bold text-slate-200 mb-1">
+                {driver.name}
+              </div>
+              <div className={`text-2xl font-bold ${getSignalColor(driver.value)} mb-2`}>
+                {driver.value > 0 ? '+' : ''}{driver.value.toFixed(1)}%
+              </div>
+              <div className="text-xs text-slate-400">
+                {driver.description}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -167,6 +218,34 @@ export const TokenDetailView: React.FC<TokenDetailViewProps> = ({
             <div className="text-xl font-bold text-white">{isNumber(token.contributors_active) ? `${token.contributors_active > 0 ? '+' : ''}${token.contributors_active.toFixed(1)}%` : '-'}</div>
           </div>
         </div>
+      </div>
+
+      {/* Subscription Toggle */}
+      <div className="mb-6">
+        <SubscriptionToggle
+          token={token.symbol}
+          fid={fid}
+          onSubscriptionChange={(subscribed) => {
+            setIsSubscribed(subscribed);
+            // Update threshold from subscription if available
+            if (subscribed) {
+              const userSubs = signalsAPI.getUserSubscriptions(fid);
+              const tokenSub = userSubs.find(sub => sub.token === token.symbol.toUpperCase());
+              if (tokenSub) {
+                setThreshold(tokenSub.threshold);
+              }
+            }
+          }}
+        />
+      </div>
+
+      {/* Alerts Log */}
+      <div className="mb-6">
+        <AlertsLog
+          token={token.symbol}
+          threshold={threshold}
+          isSubscribed={isSubscribed}
+        />
       </div>
 
       {/* Social Links */}

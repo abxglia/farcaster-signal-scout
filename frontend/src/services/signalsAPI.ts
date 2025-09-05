@@ -30,6 +30,28 @@ export interface TokenDetail extends TokenSignal {
   };
 }
 
+export interface TokenSignalTick {
+  symbol: string;
+  timestamp: number;
+  hx_mom6: number;
+  hx_liq6?: number;
+  hx_buzz6?: number;
+  hx_rankimp6?: number;
+  hx_galchg6?: number;
+  hx_sent6?: number;
+  hx_ret6?: number;
+  contributors_active?: number;
+  threshold_breached?: boolean;
+}
+
+export interface TokenSubscription {
+  id: string;
+  fid: number;
+  token: string;
+  threshold: number;
+  created_at: number;
+}
+
 // No mock data: UI uses only server-provided data
 
 // API service class
@@ -40,6 +62,8 @@ export class SignalsAPI {
   private cacheSignals: TokenSignal[] | null = null;
   private cacheAtMs: number = 0;
   private readonly cacheTtlMs: number = 60_000; // 1 minute
+  // Simple pub-sub for subscription changes
+  private subscriptionListeners: Set<() => void> = new Set();
 
   private constructor() {
     // Load watchlist from localStorage
@@ -48,10 +72,25 @@ export class SignalsAPI {
       this.watchlist = new Set(JSON.parse(saved));
     }
 
+    // Load subscriptions from localStorage
+    this.loadSubscriptions();
+
     // Prefer Vite env; fallback to local dev default
     // Example: VITE_SIGNALS_API_BASE_URL=https://your-server.example.com
     this.baseUrl = (import.meta as any).env.VITE_SIGNALS_API_BASE_URL || '';
     console.log('baseUrl', (import.meta as any).env.VITE_SIGNALS_API_BASE_URL);
+  }
+
+  // ----- Subscriptions change notifications -----
+  public onSubscriptionsChanged(listener: () => void): () => void {
+    this.subscriptionListeners.add(listener);
+    return () => this.subscriptionListeners.delete(listener);
+  }
+
+  private notifySubscriptionsChanged(): void {
+    for (const listener of this.subscriptionListeners) {
+      try { listener(); } catch { /* noop */ }
+    }
   }
 
   public static getInstance(): SignalsAPI {
@@ -157,6 +196,7 @@ export class SignalsAPI {
       if (!this.cacheSignals || (now - this.cacheAtMs) > this.cacheTtlMs) {
         console.log('Fetching fresh signals data from server');
         const data = await this.fetchJson<any[]>(`/lunarcrush`);
+        console.log('data', data);
         const mapped = (Array.isArray(data) ? data : []).map((d) => this.mapToTokenSignal(d)).filter(Boolean) as TokenSignal[];
         this.cacheSignals = mapped;
         this.cacheAtMs = now;
@@ -258,6 +298,144 @@ export class SignalsAPI {
   public async trackTokenView(symbol: string): Promise<void> {
     // In a real implementation, this would send analytics data
     console.log(`Token view tracked: ${symbol}`);
+  }
+
+  // ===== SUBSCRIPTION AND SIGNALS METHODS =====
+
+  /// Fetch current 6h signals for a specific token
+  public async getTokenSignals6h(token: string): Promise<TokenSignalTick[]> {
+    try {
+      const data = await this.fetchJson<any[]>(`/signals/6h?token=${encodeURIComponent(token)}`);
+      return (Array.isArray(data) ? data : []).map((item) => this.mapToTokenSignalTick(item)).filter(Boolean) as TokenSignalTick[];
+    } catch (e) {
+      console.error('Failed to load 6h signals for token:', token, e);
+      return [];
+    }
+  }
+
+  /// Map server response to TokenSignalTick
+  private mapToTokenSignalTick(item: any): TokenSignalTick | null {
+    if (!item) return null;
+
+    const symbol: string = (item.symbol || item.ticker || item.token || '').toString().toUpperCase();
+    if (!symbol) return null;
+
+    const m = item.metrics || {};
+    const timestamp = item.time || Date.now();
+
+    return {
+      symbol,
+      timestamp: typeof timestamp === 'number' ? timestamp : Date.now(),
+      hx_mom6: this.num(m.r_last6h_pct) ?? 0,
+      hx_liq6: this.num(m.d_pct_mktvol_6h) ?? 0,
+      hx_buzz6: this.num(m.d_pct_socvol_6h) ?? 0,
+      hx_rankimp6: this.num(m.neg_d_altrank_6h) ?? 0,
+      hx_galchg6: this.num(m.d_galaxy_6h) ?? 0,
+      hx_sent6: this.num(m.d_pct_sent_6h) ?? 0,
+      hx_ret6: this.num(item.pred_next6h_pct) ?? 0,
+      contributors_active: this.num(m.d_pct_users_6h) ?? 0,
+      threshold_breached: false // Will be set by caller based on subscription thresholds
+    };
+  }
+
+  /// Get top 3 driver contributions for a token
+  public getTopDriverContributions(token: TokenSignal): Array<{name: string, value: number, description: string}> {
+    const drivers = [
+      { name: 'Social Volume', value: token.hx_buzz6 || 0, description: 'Social volume change' },
+      { name: 'Market Volume', value: token.hx_liq6 || 0, description: 'Market volume change' },
+      { name: 'AltRank Change', value: token.hx_rankimp6 || 0, description: 'AltRank change (negated)' },
+      { name: 'Sentiment Change', value: token.hx_sent6 || 0, description: 'Sentiment change' },
+      { name: 'Galaxy Change', value: token.hx_galchg6 || 0, description: 'Galaxy composite change' },
+      { name: 'Realized Return', value: token.hx_ret6 || 0, description: 'Realized return last 6h' }
+    ];
+
+    // Sort by absolute value and return top 3
+    return drivers
+      .sort((a, b) => Math.abs(b.value) - Math.abs(a.value))
+      .slice(0, 3);
+  }
+
+  /// Check if signal breaches threshold
+  public checkThresholdBreach(signal: TokenSignalTick, threshold: number): boolean {
+    return Math.abs(signal.hx_mom6) >= Math.abs(threshold);
+  }
+
+  /// Get alerts log for last 4 ticks with threshold breaches
+  public async getAlertsLog(token: string, threshold: number): Promise<TokenSignalTick[]> {
+    try {
+      const ticks = await this.getTokenSignals6h(token);
+      
+      // Filter for threshold breaches and get last 4
+      const breachedTicks = ticks
+        .filter(tick => this.checkThresholdBreach(tick, threshold))
+        .map(tick => ({ ...tick, threshold_breached: true }))
+        .slice(-4); // Last 4 ticks
+
+      return breachedTicks;
+    } catch (e) {
+      console.error('Failed to load alerts log:', e);
+      return [];
+    }
+  }
+
+  /// Subscription management (local storage for now)
+  private subscriptions: Map<string, TokenSubscription[]> = new Map();
+
+  public addSubscription(fid: number, token: string, threshold: number): TokenSubscription {
+    const subscription: TokenSubscription = {
+      id: `${fid}-${token}-${Date.now()}`,
+      fid,
+      token: token.toUpperCase(),
+      threshold,
+      created_at: Date.now()
+    };
+
+    const userSubs = this.subscriptions.get(fid.toString()) || [];
+    userSubs.push(subscription);
+    this.subscriptions.set(fid.toString(), userSubs);
+    this.saveSubscriptions();
+    this.notifySubscriptionsChanged();
+
+    return subscription;
+  }
+
+  public removeSubscription(fid: number, subscriptionId: string): boolean {
+    const userSubs = this.subscriptions.get(fid.toString()) || [];
+    const filteredSubs = userSubs.filter(sub => sub.id !== subscriptionId);
+    
+    if (filteredSubs.length !== userSubs.length) {
+      this.subscriptions.set(fid.toString(), filteredSubs);
+      this.saveSubscriptions();
+      this.notifySubscriptionsChanged();
+      return true;
+    }
+    return false;
+  }
+
+  public getUserSubscriptions(fid: number): TokenSubscription[] {
+    return this.subscriptions.get(fid.toString()) || [];
+  }
+
+  public isSubscribedToToken(fid: number, token: string): boolean {
+    const userSubs = this.getUserSubscriptions(fid);
+    return userSubs.some(sub => sub.token === token.toUpperCase());
+  }
+
+  private saveSubscriptions(): void {
+    const data = Object.fromEntries(this.subscriptions);
+    localStorage.setItem('token-subscriptions', JSON.stringify(data));
+  }
+
+  private loadSubscriptions(): void {
+    const saved = localStorage.getItem('token-subscriptions');
+    if (saved) {
+      try {
+        const data = JSON.parse(saved);
+        this.subscriptions = new Map(Object.entries(data));
+      } catch (e) {
+        console.error('Failed to load subscriptions:', e);
+      }
+    }
   }
 }
 
